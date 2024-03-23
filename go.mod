@@ -1,4 +1,4 @@
-module github.com/realrunners/mongodbqueue
+module github.com/realrunners/mongodb-queue-go
 
 go 1.19
 
