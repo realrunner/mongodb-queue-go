@@ -25,6 +25,7 @@ func getTestDBConnection(t *testing.T) *mongo.Database {
 }
 
 type TestMessage struct {
+	Id        int       `bson:"id"`
 	Name      string    `bson:"name"`
 	CreatedAt time.Time `bson:"createdAt"`
 	Hairs     []string  `bson:"hairs"`
@@ -42,7 +43,7 @@ func TestMongoDbQueue(t *testing.T) {
 	t.Parallel()
 	t.Run("Test basics", func(t *testing.T) {
 		queue := NewMongoDbQueue[string](db, "test_queue", CreateOptions{
-			Visibility: 2,
+			Visibility: 2 * time.Second,
 			Prioritize: false,
 			MaxRetries: 2,
 		})
@@ -81,9 +82,185 @@ func TestMongoDbQueue(t *testing.T) {
 		assert.Equal(t, "test message", msg.Payload)
 	})
 
-	t.Run("Test basics", func(t *testing.T) {
+	t.Run("Test priority", func(t *testing.T) {
+		queue := NewMongoDbQueue[TestMessage](db, "test_priority_queue", CreateOptions{
+			Visibility: 250 * time.Millisecond,
+			Prioritize: true,
+			MaxRetries: 2,
+		})
+		t.Cleanup(func() {
+			_, err := queue.Collection().DeleteMany(ctx, bson.D{})
+			if err != nil {
+				t.Errorf("Error deleting documents: %v", err)
+			}
+		})
+
+		_, err := queue.AddWithOptions(ctx, TestMessage{
+			Id:   1,
+			Name: "eight",
+		}, AddOptions{
+			Priority: 8,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+		_, err = queue.AddWithOptions(ctx, TestMessage{
+			Id:   2,
+			Name: "nine",
+		}, AddOptions{
+			Priority: 9,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+		_, err = queue.AddWithOptions(ctx, TestMessage{
+			Id:   3,
+			Name: "ten",
+		}, AddOptions{
+			Priority: 10,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+
+		msg1, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.NotNil(t, msg1)
+		assert.Equal(t, msg1.Payload.Id, 3)
+
+		msg2, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.NotNil(t, msg2)
+		assert.Equal(t, msg2.Payload.Id, 2)
+
+		msg3, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.NotNil(t, msg3)
+		assert.Equal(t, msg3.Payload.Id, 1)
+	})
+
+	t.Run("Test retries", func(t *testing.T) {
+		queue := NewMongoDbQueue[TestMessage](db, "test_retry_queue", CreateOptions{
+			Visibility: 50 * time.Millisecond,
+			Prioritize: true,
+			MaxRetries: 2,
+		})
+		t.Cleanup(func() {
+			_, err := queue.Collection().DeleteMany(ctx, bson.D{})
+			if err != nil {
+				t.Errorf("Error deleting documents: %v", err)
+			}
+		})
+
+		_, err := queue.AddWithOptions(ctx, TestMessage{
+			Id:   1,
+			Name: "eight",
+		}, AddOptions{
+			Priority: 8,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+
+		msg1, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+
+		assert.NotNil(t, msg1)
+
+		time.Sleep(60 * time.Millisecond)
+
+		msg2, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+
+		assert.Nil(t, msg2)
+
+	})
+
+	t.Run("Test delay", func(t *testing.T) {
+		queue := NewMongoDbQueue[TestMessage](db, "test_delay_queue", CreateOptions{
+			Visibility: 250 * time.Millisecond,
+			Prioritize: true,
+			MaxRetries: 2,
+		})
+		t.Cleanup(func() {
+			_, err := queue.Collection().DeleteMany(ctx, bson.D{})
+			if err != nil {
+				t.Errorf("Error deleting documents: %v", err)
+			}
+		})
+
+		testMessage := TestMessage{
+			Id:        1,
+			Name:      "test retry",
+			CreatedAt: time.Now(),
+			Hairs:     []string{"black", "brown"},
+		}
+		_, err := queue.AddWithOptions(ctx, testMessage, AddOptions{
+			Delay:    250 * time.Millisecond,
+			Priority: 10,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+
+		msg, err := queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.Nil(t, msg)
+
+		time.Sleep(260 * time.Millisecond)
+
+		msg, err = queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.NotNil(t, msg)
+
+		time.Sleep(60 * time.Millisecond)
+
+		_, err = queue.Ping(ctx, *msg.Ack)
+		if err != nil {
+			t.Errorf("Error pinging %v", err)
+			return
+		}
+
+		time.Sleep(200 * time.Millisecond)
+
+		msg, err = queue.Get(ctx)
+		if err != nil {
+			t.Errorf("Error getting message: %v", err)
+			return
+		}
+		assert.Nil(t, msg)
+
+	})
+
+	t.Run("Test basics struct", func(t *testing.T) {
 		queue := NewMongoDbQueue[TestMessage](db, "test_struct_queue", CreateOptions{
-			Visibility: 2,
+			Visibility: 200 * time.Millisecond,
 			Prioritize: false,
 			MaxRetries: 2,
 		})
@@ -95,6 +272,7 @@ func TestMongoDbQueue(t *testing.T) {
 		})
 
 		testMessage := TestMessage{
+			Id:        1,
 			Name:      "test message",
 			CreatedAt: time.Now(),
 			Hairs:     []string{"black", "brown"},
@@ -133,5 +311,51 @@ func TestMongoDbQueue(t *testing.T) {
 		}
 		assert.Nil(t, msg)
 
+		testMessage.Id = 9
+		id3, err := queue.AddWithOptions(ctx, testMessage, AddOptions{
+			HashKey:      "id",
+			HashKeyValue: testMessage.Id,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+		id4, err := queue.AddWithOptions(ctx, testMessage, AddOptions{
+			HashKey:      "id",
+			HashKeyValue: testMessage.Id,
+		})
+		if err != nil {
+			t.Errorf("Error adding message: %v", err)
+			return
+		}
+		assert.Equal(t, id3, id4)
+
+		total, err := queue.Total(ctx)
+		if err != nil {
+			t.Errorf("Error getting total: %v", err)
+			return
+		}
+		assert.Equal(t, int64(2), total)
+
+		size, err := queue.Size(ctx)
+		if err != nil {
+			t.Errorf("Error getting size: %v", err)
+			return
+		}
+		assert.Equal(t, int64(1), size)
+
+		inFlight, err := queue.InFlight(ctx)
+		if err != nil {
+			t.Errorf("Error getting in flight: %v", err)
+			return
+		}
+		assert.Equal(t, int64(1), inFlight)
+
+		done, err := queue.Done(ctx)
+		if err != nil {
+			t.Errorf("Error getting done: %v", err)
+			return
+		}
+		assert.Equal(t, int64(2), done)
 	})
 }

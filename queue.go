@@ -26,15 +26,16 @@ type MessageSchema[T any] struct {
 }
 
 type AddOptions struct {
-	HashKey  string `json:"hashKey"`
-	Delay    *int   `json:"delay"`
-	Priority *int   `json:"priority"`
+	HashKey      string        `json:"hashKey"`
+	HashKeyValue interface{}   `json:"hashKeyValue"`
+	Delay        time.Duration `json:"delay"`
+	Priority     int           `json:"priority"`
 }
 
 type CreateOptions struct {
-	Visibility int  `json:"visibility"`
-	Prioritize bool `json:"prioritize"`
-	MaxRetries int  `json:"maxRetries"`
+	Visibility time.Duration `json:"visibility"`
+	Prioritize bool          `json:"prioritize"`
+	MaxRetries int           `json:"maxRetries"`
 }
 
 type MongoDbQueue[T any] interface {
@@ -42,7 +43,7 @@ type MongoDbQueue[T any] interface {
 	AddWithOptions(ctx context.Context, payload T, options AddOptions) (string, error)
 	Ack(ctx context.Context, id string) (string, error)
 	Get(ctx context.Context) (*MessageSchema[T], error)
-	GetWithVisibility(ctx context.Context, visibility int) (*MessageSchema[T], error)
+	GetWithVisibility(ctx context.Context, visibility time.Duration) (*MessageSchema[T], error)
 	Ping(ctx context.Context, ack string) (string, error)
 	Total(ctx context.Context) (int64, error)
 	Size(ctx context.Context) (int64, error)
@@ -56,14 +57,14 @@ type MongoDbQueue[T any] interface {
 type MongoDbQueueImpl[T any] struct {
 	db         *mongo.Database
 	name       string
-	visibility int
+	visibility time.Duration
 	prioritize bool
 	maxRetries int
 }
 
 func NewMongoDbQueue[T any](db *mongo.Database, queueName string, options CreateOptions) MongoDbQueue[T] {
 	if options.MaxRetries == 0 {
-		options.MaxRetries = 1
+		options.MaxRetries = 2
 	}
 	if options.Visibility == 0 {
 		options.Visibility = 30
@@ -113,14 +114,21 @@ func (m *MongoDbQueueImpl[T]) Add(ctx context.Context, payload T) (string, error
 	return m.AddWithOptions(ctx, payload, AddOptions{})
 }
 
-func GetFieldByName(obj interface{}, fieldName string) interface{} {
-	objValue := reflect.ValueOf(obj).Elem()
-	fieldValue := objValue.FieldByName(fieldName)
-	return fieldValue.Interface()
-}
+// func GetFieldByName(obj interface{}, fieldName string) interface{} {
+// 	objValue := reflect.ValueOf(obj)
+// 	if objValue.Kind() == reflect.Ptr {
+// 		objValue = objValue.Elem()
+// 	}
+// 	fieldValue := objValue.FieldByName(fieldName)
+// 	return fieldValue.Interface()
+// }
 
 func IsStruct(obj interface{}) bool {
-	return reflect.ValueOf(obj).Kind() == reflect.Struct
+	objValue := reflect.ValueOf(obj)
+	if objValue.Kind() == reflect.Ptr {
+		objValue = objValue.Elem()
+	}
+	return objValue.Kind() == reflect.Struct
 }
 
 // Add implements MongoDbQueue.
@@ -128,8 +136,8 @@ func (m *MongoDbQueueImpl[T]) AddWithOptions(ctx context.Context, payload T, opt
 	now := time.Now()
 
 	visible := now
-	if opts.Delay != nil {
-		visible = now.Add(time.Second * time.Duration(*opts.Delay))
+	if opts.Delay != 0 {
+		visible = now.Add(opts.Delay)
 	}
 
 	insertFields := bson.D{
@@ -137,21 +145,12 @@ func (m *MongoDbQueueImpl[T]) AddWithOptions(ctx context.Context, payload T, opt
 		{"visible", visible},
 		{"tries", 0},
 		{"payload", payload},
-		{"priority", opts.Priority},
+	}
+	if opts.Priority > 0 {
+		insertFields = append(insertFields, bson.E{"priority", opts.Priority})
 	}
 
-	// //
-	// if IsStruct(payload) {
-	// 	marshalled, err := bson.Marshal(payload)
-	// 	if err != nil {
-	// 		return "", err
-	// 	}
-	// 	insertFields = append(insertFields, bson.E{"payload", marshalled})
-	// } else {
-	// 	insertFields = append(insertFields, bson.E{"payload", payload})
-	// }
-
-	if opts.HashKey == "" {
+	if opts.HashKeyValue == nil {
 		insertFields = append(insertFields, bson.E{"occurences", 1})
 		r, err := m.Collection().InsertOne(ctx, insertFields)
 		if err != nil {
@@ -160,9 +159,9 @@ func (m *MongoDbQueueImpl[T]) AddWithOptions(ctx context.Context, payload T, opt
 		return r.InsertedID.(primitive.ObjectID).Hex(), nil
 	}
 
-	filter := bson.D{{"payload", opts.HashKey}}
+	filter := bson.D{{"payload", opts.HashKeyValue}}
 	if IsStruct(payload) {
-		filter = bson.D{{fmt.Sprintf("payload.%s", opts.HashKey), GetFieldByName(payload, opts.HashKey)}}
+		filter = bson.D{{fmt.Sprintf("payload.%s", opts.HashKey), opts.HashKeyValue}}
 	}
 
 	result := m.Collection().FindOneAndUpdate(ctx, filter, bson.D{
@@ -189,7 +188,7 @@ func (m *MongoDbQueueImpl[T]) Get(ctx context.Context) (*MessageSchema[T], error
 }
 
 // GetWithVisibility implements MongoDbQueue.
-func (m *MongoDbQueueImpl[T]) GetWithVisibility(ctx context.Context, visibility int) (*MessageSchema[T], error) {
+func (m *MongoDbQueueImpl[T]) GetWithVisibility(ctx context.Context, visibility time.Duration) (*MessageSchema[T], error) {
 	if visibility == 0 {
 		visibility = m.visibility
 	}
@@ -200,7 +199,7 @@ func (m *MongoDbQueueImpl[T]) GetWithVisibility(ctx context.Context, visibility 
 	}
 	update := bson.D{
 		{"$set", bson.D{
-			{"visible", now.Add(time.Second * time.Duration(visibility))},
+			{"visible", now.Add(visibility)},
 			{"ack", id()},
 			{"updatedAt", now},
 		}},
@@ -251,7 +250,7 @@ func (m *MongoDbQueueImpl[T]) Ping(ctx context.Context, ack string) (string, err
 }
 
 // Ping implements MongoDbQueue.
-func (m *MongoDbQueueImpl[T]) PingWithVisibility(ctx context.Context, ack string, visibility int) (string, error) {
+func (m *MongoDbQueueImpl[T]) PingWithVisibility(ctx context.Context, ack string, visibility time.Duration) (string, error) {
 	if visibility == 0 {
 		visibility = m.visibility
 	}
@@ -263,7 +262,7 @@ func (m *MongoDbQueueImpl[T]) PingWithVisibility(ctx context.Context, ack string
 	}
 	update := bson.D{
 		{"$set", bson.D{
-			{"visible", now.Add(time.Second * time.Duration(visibility))},
+			{"visible", now.Add(visibility)},
 		}},
 	}
 	result := m.Collection().FindOneAndUpdate(ctx, filter, update, options.FindOneAndUpdate().SetReturnDocument(options.After))
