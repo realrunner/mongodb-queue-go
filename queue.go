@@ -114,15 +114,6 @@ func (m *MongoDbQueueImpl[T]) Add(ctx context.Context, payload T) (string, error
 	return m.AddWithOptions(ctx, payload, AddOptions{})
 }
 
-// func GetFieldByName(obj interface{}, fieldName string) interface{} {
-// 	objValue := reflect.ValueOf(obj)
-// 	if objValue.Kind() == reflect.Ptr {
-// 		objValue = objValue.Elem()
-// 	}
-// 	fieldValue := objValue.FieldByName(fieldName)
-// 	return fieldValue.Interface()
-// }
-
 func IsStruct(obj interface{}) bool {
 	objValue := reflect.ValueOf(obj)
 	if objValue.Kind() == reflect.Ptr {
